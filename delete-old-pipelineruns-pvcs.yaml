@@ -1,0 +1,47 @@
+apiVersion: batch/v1
+kind: CronJob
+metadata:
+  name: delete-old-pipelineruns-pvcs
+  namespace: devtools-gitops-managed-service
+spec:
+  schedule: "*/30 * * * *"
+  successfulJobsHistoryLimit: 1
+  failedJobsHistoryLimit: 1
+  jobTemplate:
+    spec:
+      template:
+        #ttlSecondsAfterFinished: 100
+        spec:
+          containers:
+          - name: delete-old-pipelineruns-pvcs-0
+            image: quay.io/bluengop/kontainerized-kuttl:latest
+            imagePullPolicy: IfNotPresent
+            command:
+            - /bin/bash
+            - -c
+            - |
+              # Check if the Quota is below the limit, and exit if it is:
+              used_pvc=$(kubectl get resourcequota devtools-gitops-managed-service-quota -n devtools-gitops-managed-service --template='{{.status.used.persistentvolumeclaims}}')
+              if (( ${used_pvc} < 7 ))
+              then echo "PVC are within the quota: ${used_pvc}/8"
+              exit 0
+              fi
+
+              # Get all PVCs except "install-dir" and the two latest from pipelineruns:
+              pvcs=$(kubectl get pvc -n devtools-gitops-managed-service --field-selector metadata.name!=install-dir --sort-by=.metadata.creationTimestamp -o=jsonpath='{.items[:4].metadata.name}' | tr ' ' '\n')
+              echo -e "PVCs to be removed:\n${pvcs}\n"
+
+              # Delete PVCs, patching them after deletion to prevent finalizer to block the job:
+              for p in ${pvcs}
+              do echo "Deleting PVC ${p}"
+              # it deletes the PVC in the background, so doesn't block the execution by a "Terminating" state"
+              kubectl delete pvc "${p}" -n devtools-gitops-managed-service &
+              kubectl patch pvc "${p}" -n devtools-gitops-managed-service -p '{\"metadata\":{\"finalizers\":null}}'
+              done
+
+              # Print to stdout and exit
+              echo "PVCs cleaned up successfully"
+              exit 0
+          restartPolicy: OnFailure
+          serviceAccountName: pipeline
+
